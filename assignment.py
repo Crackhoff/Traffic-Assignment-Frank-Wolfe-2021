@@ -4,14 +4,16 @@ import time
 
 import networkx as nx
 import scipy
+import matplotlib.pyplot as plt
 
 from network_import import *
-from utils import PathUtils
+from utils import PathUtils, graph_od_pair
 
 
 class FlowTransportNetwork:
 
     def __init__(self):
+        self.linkSetWithOD = {}
         self.linkSet = {}
         self.nodeSet = {}
 
@@ -258,6 +260,7 @@ def loadAON(network: FlowTransportNetwork, computeXbar: bool = True):
     This method produces auxiliary flows for all or nothing loading.
     """
     x_bar = {l: 0.0 for l in network.linkSet}
+    x_bar_od = {l: 0.0 for l in network.linkSetWithOD}
     SPTT = 0.0
     for r in network.originZones:
         DijkstraHeap(r, network=network)
@@ -272,8 +275,8 @@ def loadAON(network: FlowTransportNetwork, computeXbar: bool = True):
             if computeXbar and r != s:
                 for spLink in tracePreds(s, network):
                     x_bar[spLink] = x_bar[spLink] + dem
-
-    return SPTT, x_bar
+                    x_bar_od[spLink + (r, s)] = dem
+    return SPTT, x_bar, x_bar_od
 
 
 def readDemand(demand_df: pd.DataFrame, network: FlowTransportNetwork):
@@ -291,6 +294,21 @@ def readDemand(demand_df: pd.DataFrame, network: FlowTransportNetwork):
         if term_node not in network.zoneSet[init_node].destList:
             network.zoneSet[init_node].destList.append(term_node)
 
+    for link in network.linkSet:
+        for od in network.tripSet:
+            # print(link, od)
+            # print(network.linkSet[link])
+            network.linkSetWithOD[link + od] = Link(init_node=network.linkSet[link].init_node,
+                                                        term_node=network.linkSet[link].term_node,
+                                                        capacity=network.linkSet[link].capacity,
+                                                        length=network.linkSet[link].length,
+                                                        fft=network.linkSet[link].fft,
+                                                        b=network.linkSet[link].alpha,
+                                                        power=network.linkSet[link].beta,
+                                                        speed_limit=network.linkSet[link].speedLimit,
+                                                        toll=network.linkSet[link].toll,
+                                                        linkType=network.linkSet[link].linkType
+                                                        )
     print(len(network.tripSet), "OD pairs")
     print(len(network.zoneSet), "OD zones")
 
@@ -380,7 +398,7 @@ def assignment_loop(network: FlowTransportNetwork,
     while gap > accuracy:
 
         # Get x_bar throug all-or-nothing assignment
-        _, x_bar = loadAON(network=network)
+        _, x_bar, x_bar_od = loadAON(network=network)
 
         if algorithm == "MSA" or iteration_number == 1:
             alpha = (1 / iteration_number)
@@ -398,14 +416,15 @@ def assignment_loop(network: FlowTransportNetwork,
         # Apply flow improvement
         for l in network.linkSet:
             network.linkSet[l].flow = alpha * x_bar[l] + (1 - alpha) * network.linkSet[l].flow
-
+            for od in network.tripSet:
+                network.linkSetWithOD[l + od].flow = alpha * x_bar_od[l + od] + (1 - alpha) * network.linkSetWithOD[l + od].flow
         # Compute the new travel time
         updateTravelTime(network=network,
                          optimal=systemOptimal,
                          costFunction=costFunction)
 
         # Compute the relative gap
-        SPTT, _ = loadAON(network=network, computeXbar=False)
+        SPTT, _, _ = loadAON(network=network, computeXbar=False)
         SPTT = round(SPTT, 9)
         TSTT = round(sum([network.linkSet[a].flow * network.linkSet[a].cost for a in
                           network.linkSet]), 9)
@@ -474,7 +493,34 @@ def writeResults(network: FlowTransportNetwork, output_file: str, costFunction=B
                                                                network.linkSet[i].speedLimit
                                                                ))
         outFile.write(tmpOut + "\n")
+    
+    outFile.write("\n\nOD PAIRS\n")
+    
+    outFile.write("init_node\tterm_node\tdemand\n")
+    outFile.write("init_node\tterm_node\tflow\ttravelTimeOnLink\n")
+    
+    for od in network.tripSet:
+        tmpOut = str(od[0]) + "\t" + str(od[1]) + "\t" + str(network.tripSet[od].demand)
+        outFile.write(tmpOut + "\n")
+        for i in network.linkSet:
+            tmpOut = str(network.linkSet[i].init_node) + "\t" + str(
+                network.linkSet[i].term_node) + "\t" + str(
+                network.linkSetWithOD[i + od].flow) + "\t" + str(costFunction(False,
+                                                                   network.linkSet[i].fft,
+                                                                   network.linkSet[i].alpha,
+                                                                   network.linkSetWithOD[i + od].flow,
+                                                                   network.linkSet[i].max_capacity,
+                                                                   network.linkSet[i].beta,
+                                                                   network.linkSet[i].length,
+                                                                   network.linkSet[i].speedLimit
+                                                                   ))
+            outFile.write(tmpOut + "\n")
+        outFile.write("\n")
     outFile.close()
+    
+    if verbose:
+        # for each OD pair draw a graph with weights as a flow
+        graph_od_pair(network)
 
 
 def load_network(net_file: str,
@@ -500,8 +546,8 @@ def load_network(net_file: str,
 
     network = FlowTransportNetwork()
 
-    readDemand(demand_df, network=network)
     readNetwork(net_df, network=network)
+    readDemand(demand_df, network=network)
 
     network.originZones = set([k[0] for k in network.tripSet])
 
@@ -576,13 +622,14 @@ if __name__ == '__main__':
     net_file = str(PathUtils.sioux_falls_net_file)
 
     total_system_travel_time_optimal = computeAssingment(net_file=net_file,
+                                                         
                                                          algorithm="FW",
                                                          costFunction=BPRcostFunction,
                                                          systemOptimal=True,
                                                          verbose=True,
                                                          accuracy=0.00001,
                                                          maxIter=1000,
-                                                         maxTime=6000000)
+                                                         maxTime=6000000,results_file='res.txt',force_net_reprocess=True)
 
     total_system_travel_time_equilibrium = computeAssingment(net_file=net_file,
                                                              algorithm="FW",
@@ -591,6 +638,8 @@ if __name__ == '__main__':
                                                              verbose=True,
                                                              accuracy=0.001,
                                                              maxIter=1000,
-                                                             maxTime=6000000)
+                                                             maxTime=6000000, results_file='res2.txt')
 
     print("UE - SO = ", total_system_travel_time_equilibrium - total_system_travel_time_optimal)
+
+    # calculate result for each OD pair

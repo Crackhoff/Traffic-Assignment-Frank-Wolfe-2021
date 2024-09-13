@@ -1,3 +1,6 @@
+import matplotlib.pyplot as plt
+import networkx as nx
+
 from pathlib import Path
 
 
@@ -31,3 +34,14 @@ class PathUtils:
 
 
 
+def graph_od_pair(network):
+    for od in network.tripSet:
+        G = network.to_networkx()
+        for i in network.linkSet:
+            G.add_edge(network.linkSet[i].init_node, network.linkSet[i].term_node, weight=round(network.linkSetWithOD[i + od].flow,2))
+        edge_labels = nx.get_edge_attributes(G, 'weight')
+        # filter out the edges with 0 flow
+        edge_labels = {k: v for k, v in edge_labels.items() if v > 0}
+        nx.draw(G, with_labels=True)
+        nx.draw_networkx_edge_labels(G, pos=nx.spring_layout(G), edge_labels=edge_labels)
+        plt.show()
